@@ -11,6 +11,11 @@ runs first and either:
 Tests then run against freshly created databases on that server.  They never
 read ``RELAY_DATABASE_URL``, so a developer's real database cannot be dropped
 by accident.
+
+``RELAY_TEST_DOCKER_HOST`` is the address at which ports published by Docker
+containers are reachable from the tests: ``127.0.0.1`` (default) on a normal
+host, or ``host.docker.internal`` when the tests themselves run inside a
+container on Docker Desktop, e.g. under ``act``.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import pytest
 from psycopg import sql
 
 POSTGRES_IMAGE = "postgres:17-alpine"
+PUBLISHED_HOST = os.getenv("RELAY_TEST_DOCKER_HOST", "127.0.0.1")
 _admin_url: str | None = None
 _container_id: str | None = None
 
@@ -49,7 +55,7 @@ def _start_container() -> str:
     port = subprocess.run(
         ["docker", "port", _container_id, "5432/tcp"], capture_output=True, text=True, check=True
     ).stdout.splitlines()[0].rsplit(":", 1)[1]
-    return f"postgresql://postgres:{password}@127.0.0.1:{port}/postgres"
+    return f"postgresql://postgres:{password}@{PUBLISHED_HOST}:{port}/postgres"
 
 
 def _wait_for(url: str) -> None:

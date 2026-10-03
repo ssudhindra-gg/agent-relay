@@ -1,0 +1,8 @@
+# Local runs of .github/workflows with https://nektosact.com/ :  act
+# Medium runner image: has docker CLI + compose, git, python3, curl.
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+# Mount the host Docker daemon into job containers (Docker Desktop path).
+--container-daemon-socket /var/run/docker.sock
+# act's own registry pull can fail on stale Docker Hub credentials; pre-pull
+# the runner image with `docker pull catthehacker/ubuntu:act-latest` instead.
+--pull=false

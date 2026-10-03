@@ -41,9 +41,11 @@ import httpx
 import psycopg
 import pytest
 
-from conftest import create_database, drop_database
+from conftest import PUBLISHED_HOST, create_database, drop_database
 
 PROJECT_DIR = Path(__file__).resolve().parent
+# In CI every target must run: a missing tool or cluster is an error, not a skip.
+REQUIRE_TARGETS = os.getenv("RELAY_TEST_REQUIRE_TARGETS", "").lower() in {"1", "true", "yes"}
 
 
 @dataclass
@@ -78,6 +80,12 @@ def wait_until_ready(base_url: str, exit_log: Callable[[], str | None]) -> None:
         if time.monotonic() > deadline:
             pytest.fail("relay did not become ready within 60 seconds")
         time.sleep(0.2)
+
+
+def target_unavailable(reason: str):
+    if REQUIRE_TARGETS:
+        pytest.fail(f"{reason} (RELAY_TEST_REQUIRE_TARGETS is set)")
+    pytest.skip(reason)
 
 
 def docker_available() -> bool:
@@ -120,7 +128,7 @@ def process_relay(postgres_admin_url):
 @pytest.fixture(scope="module")
 def compose_relay():
     if not docker_available():
-        pytest.skip("Docker is not available")
+        target_unavailable("Docker is not available")
     project = f"relay-it-{uuid.uuid4().hex[:8]}"
     password = uuid.uuid4().hex
     env = {
@@ -153,8 +161,8 @@ def compose_relay():
     try:
         # --build so the stack runs the code under test, not a stale image.
         compose("up", "-d", "--build", "--wait", "--wait-timeout", "120", timeout=900)
-        base_url = f"http://127.0.0.1:{host_port('relay', 8000)}"
-        database_url = f"postgresql://relay:{password}@127.0.0.1:{host_port('postgres', 5432)}/relay"
+        base_url = f"http://{PUBLISHED_HOST}:{host_port('relay', 8000)}"
+        database_url = f"postgresql://relay:{password}@{PUBLISHED_HOST}:{host_port('postgres', 5432)}/relay"
 
         def exit_log() -> str | None:
             if compose("ps", "-q", "--status", "running", "relay"):
@@ -211,9 +219,9 @@ def wait_for_port(port: int, proc: subprocess.Popen, log_path: Path) -> None:
 def kubernetes_relay(tmp_path_factory):
     cluster = os.getenv("RELAY_TEST_KIND_CLUSTER", "kind")
     if not docker_available() or shutil.which("kind") is None or shutil.which("kubectl") is None:
-        pytest.skip("kind, kubectl, or Docker is not available")
+        target_unavailable("kind, kubectl, or Docker is not available")
     if cluster not in subprocess.run(["kind", "get", "clusters"], capture_output=True, text=True).stdout.split():
-        pytest.skip(f"kind cluster {cluster!r} does not exist (set RELAY_TEST_KIND_CLUSTER)")
+        target_unavailable(f"kind cluster {cluster!r} does not exist (set RELAY_TEST_KIND_CLUSTER)")
 
     suffix = uuid.uuid4().hex[:8]
     namespace = f"relay-it-{suffix}"

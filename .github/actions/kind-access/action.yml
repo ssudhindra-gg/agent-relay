@@ -1,0 +1,57 @@
+name: kind access
+description: >
+  Make a kind cluster available to the job.  On GitHub-hosted runners this
+  creates a fresh, throwaway cluster.  Under act (local runs) it installs the
+  kind and kubectl CLIs and connects to the developer's existing cluster
+  through the mounted Docker socket instead of creating one.
+
+inputs:
+  cluster-name:
+    description: kind cluster name (kubectl context is kind-<name>)
+    default: kind
+  kind-version:
+    default: v0.33.0
+  kubectl-version:
+    default: v1.37.0
+
+runs:
+  using: composite
+  steps:
+    - name: Create throwaway kind cluster
+      if: ${{ !env.ACT }}
+      uses: helm/kind-action@v1.15.0
+      with:
+        cluster_name: ${{ inputs.cluster-name }}
+        version: ${{ inputs.kind-version }}
+        kubectl_version: ${{ inputs.kubectl-version }}
+        wait: 120s
+
+    # Not helm/kind-action here: act on Windows copies action files from an
+    # NTFS cache, dropping their executable bits ("kind.sh: Permission denied").
+    - name: Install kind and kubectl (act)
+      if: ${{ env.ACT }}
+      shell: bash
+      run: |
+        curl -fsSLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${{ inputs.kind-version }}/kind-linux-amd64"
+        curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${{ inputs.kubectl-version }}/bin/linux/amd64/kubectl"
+        chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+        kind version
+        kubectl version --client
+
+    - name: Connect to existing kind cluster (act)
+      if: ${{ env.ACT }}
+      shell: bash
+      run: |
+        if ! kind get clusters | grep -qx "${{ inputs.cluster-name }}"; then
+          echo "::error::kind cluster '${{ inputs.cluster-name }}' not found on the Docker host"
+          exit 1
+        fi
+        # The cluster's published API port is reachable from act's
+        # host-network job container, so the external kubeconfig works.
+        kind export kubeconfig --name "${{ inputs.cluster-name }}"
+
+    - name: Show cluster
+      shell: bash
+      run: |
+        kubectl config current-context
+        kubectl get nodes
