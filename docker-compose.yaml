@@ -1,0 +1,48 @@
+# Agent Relay API + PostgreSQL.
+#
+#   docker compose up -d --build     # API on http://localhost:8000
+#   docker compose logs -f relay
+#   docker compose down              # keep data;  add -v to wipe it
+#
+# Optional overrides (shell env or a .env file next to this file):
+#   POSTGRES_PASSWORD        default "relay"; change it for anything shared
+#   RELAY_PORT               host binding for the API, default 8000
+#   POSTGRES_PORT            host binding for Postgres, default 127.0.0.1:5432
+#   RELAY_LEASE_SECONDS, RELAY_MAX_ATTEMPTS, RELAY_ENROLLMENT_SECRET
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relay}
+      POSTGRES_DB: relay
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      # Published on loopback only, for psql/debugging from this machine.
+      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  relay:
+    build: .
+    image: agent-relay:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RELAY_DATABASE_URL: postgresql+psycopg://relay:${POSTGRES_PASSWORD:-relay}@postgres:5432/relay
+      RELAY_LEASE_SECONDS: ${RELAY_LEASE_SECONDS:-60}
+      RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-5}
+      RELAY_ENROLLMENT_SECRET: ${RELAY_ENROLLMENT_SECRET:-}
+    ports:
+      - "${RELAY_PORT:-8000}:8000"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

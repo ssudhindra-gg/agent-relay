@@ -6,3 +6,5 @@
 __pycache__/
 .pytest_cache/
 *-credentials.json
+k8s/postgres.env
+.deploy/

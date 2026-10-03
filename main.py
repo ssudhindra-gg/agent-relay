@@ -1,6 +1,6 @@
 """FastAPI routes for Agent Relay.
 
-Persistence and SQLite transaction details live in :mod:`database` and
+Persistence and PostgreSQL transaction details live in :mod:`database` and
 :mod:`storage`; the deterministic local worker is in :mod:`worker`.
 """
 
@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, Header, Path as FastAPIPath, Query, Reques
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from sqlalchemy import text
+from psycopg.errors import TransactionRollback
 from sqlalchemy.exc import OperationalError
 
 from database import (
@@ -79,6 +80,12 @@ def current_agent(authorization: str | None = Header(default=None)):
     return authenticate(bearer_value(authorization))
 
 
+def is_transient(exc: OperationalError) -> bool:
+    """Deadlocks and serialization failures roll back cleanly and can be retried."""
+
+    return isinstance(exc.orig, TransactionRollback)
+
+
 def page_params(limit: int, cursor: str | None) -> tuple[int, tuple[Any, str] | None]:
     if limit < 1 or limit > MAX_PAGE_SIZE:
         raise RelayError("invalid_input", f"limit must be between 1 and {MAX_PAGE_SIZE}.", 400)
@@ -118,7 +125,10 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Agent Relay", version="0.1.0", lifespan=lifespan)
 # ASGI transports used by small scripts do not always run lifespan handlers;
 # initialize the schema at import as well as during normal application startup.
-init_db()
+# `python main.py worker` is a pure HTTP client that may run on a machine with
+# no database access, so it must not connect here.
+if __name__ != "__main__":
+    init_db()
 
 
 @app.exception_handler(RelayError)
@@ -210,7 +220,7 @@ async def tasks_create(
             result = create_task(current.id, body.to, body.input, idempotency_key)
             return JSONResponse(status_code=201, content=result)
         except OperationalError as exc:
-            if retry == 2 or "locked" not in str(exc).lower():
+            if retry == 2 or not is_transient(exc):
                 raise
             await asyncio.sleep(0.05 * (retry + 1))
     raise RelayError("storage_error", "The task could not be persisted.", 503)
@@ -226,7 +236,7 @@ async def claim(
         try:
             result = await asyncio.to_thread(claim_one, current.id, body.worker_id)
         except OperationalError as exc:
-            if "locked" not in str(exc).lower():
+            if not is_transient(exc):
                 raise
             result = None
         if result is not None:

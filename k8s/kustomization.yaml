@@ -1,0 +1,27 @@
+# Agent Relay + PostgreSQL for a local kind cluster.
+#
+#   kind load docker-image agent-relay:local
+#   kubectl apply -k k8s/
+#   kubectl -n agent-relay port-forward svc/relay 8080:8000
+#
+# k8s/postgres.env (gitignored) must define POSTGRES_PASSWORD; copy
+# postgres.env.example and use a URL-safe value (e.g. hex).  The password is
+# only applied when the database volume is first initialized.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agent-relay
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - relay.yaml
+
+secretGenerator:
+  - name: postgres-credentials
+    envs:
+      - postgres.env
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: agent-relay

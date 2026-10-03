@@ -1,0 +1,131 @@
+name: CI
+
+# test:   unit tests + acceptance scenario 1 against a uvicorn process, the
+#         Compose stack, and the k8s/ manifests on kind -- all on PostgreSQL.
+# deploy: only after test passes, build a uniquely tagged image, load it into
+#         kind, roll it out from k8s/, wait for the rollout, and smoke-test it.
+#
+# On GitHub-hosted runners each job gets a throwaway kind cluster.  Locally,
+# `act` (see .actrc) runs the same jobs against the developer's existing
+# kind cluster through the mounted Docker socket.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes no floating major tag; pin the release.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          # Pinned so lockfile checks are reproducible; keep in step with
+          # the Dockerfile's uv image.
+          version: "0.12.22"
+
+      - name: kind cluster for the kubernetes target
+        uses: ./.github/actions/kind-access
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        env:
+          # A missing Docker/kind target fails the run instead of skipping.
+          RELAY_TEST_REQUIRE_TARGETS: "1"
+          # Under act the tests run inside a container, where Docker-published
+          # ports are reachable via host.docker.internal, not loopback.
+          RELAY_TEST_DOCKER_HOST: ${{ env.ACT && 'host.docker.internal' || '127.0.0.1' }}
+        run: uv run pytest -v -rs
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NAMESPACE: agent-relay
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: kind cluster to deploy to
+        uses: ./.github/actions/kind-access
+
+      - name: Compute unique image tag
+        run: |
+          # Commit + hash of everything the image is built from, so every
+          # code version (including uncommitted local changes under act) gets
+          # its own tag, and the Deployment always sees a new image.
+          sources=$(ls *.py | grep -Ev '^(test_.*|conftest)\.py$' | sort)
+          digest=$(cat Dockerfile .dockerignore pyproject.toml uv.lock dashboard.html $sources | sha256sum | cut -c1-12)
+          echo "IMAGE=agent-relay:${GITHUB_SHA::7}-${digest}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+
+      - name: Load image into kind
+        run: kind load docker-image "$IMAGE" --name kind
+
+      - name: Database password
+        run: |
+          # Postgres keeps the password its volume was initialized with, so
+          # reuse the one an existing deployment already uses; only a brand
+          # new cluster gets a fresh random password.
+          if [ ! -f k8s/postgres.env ]; then
+            secret=$(kubectl -n "$NAMESPACE" get deployment relay \
+              -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="POSTGRES_PASSWORD")].valueFrom.secretKeyRef.name}' \
+              2>/dev/null || true)
+            if [ -n "$secret" ]; then
+              password=$(kubectl -n "$NAMESPACE" get secret "$secret" -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
+              echo "Reusing the password from secret $secret"
+            else
+              password=$(openssl rand -hex 24)
+              echo "No existing deployment; generated a new password"
+            fi
+            echo "::add-mask::$password"
+            (umask 077 && printf 'POSTGRES_PASSWORD=%s\n' "$password" > k8s/postgres.env)
+          fi
+
+      - name: Deploy and wait for rollout
+        run: |
+          mkdir -p .deploy
+          cat > .deploy/kustomization.yaml <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - ../k8s
+          images:
+            - name: agent-relay
+              newTag: ${IMAGE#agent-relay:}
+          EOF
+          kubectl apply -k .deploy
+          kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=300s
+          kubectl -n "$NAMESPACE" rollout status deployment/relay --timeout=300s
+          kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=relay \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.containers[0].image}{"\n"}{end}'
+
+      - name: Smoke test the deployment
+        run: |
+          kubectl -n "$NAMESPACE" port-forward svc/relay 18080:8000 > port-forward.log 2>&1 &
+          trap 'kill $!' EXIT
+          python3 scripts/smoke.py http://127.0.0.1:18080
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" get all,pvc || true
+          kubectl -n "$NAMESPACE" describe pods || true
+          kubectl -n "$NAMESPACE" logs deployment/relay --all-containers --tail=100 || true
+          cat port-forward.log 2>/dev/null || true
