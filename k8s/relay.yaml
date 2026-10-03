@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay
+  labels:
+    app.kubernetes.io/name: relay
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: relay
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  labels:
+    app.kubernetes.io/name: relay
+spec:
+  # Several replicas are safe: claims coordinate through PostgreSQL row locks
+  # (FOR UPDATE SKIP LOCKED), not process memory.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: relay
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      initContainers:
+        # Wait for the database instead of crash-looping until it is up.
+        - name: wait-for-postgres
+          image: postgres:17-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -p 5432 -U relay -d relay; do sleep 1; done
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      containers:
+        - name: relay
+          # Built locally and loaded with `kind load docker-image`; never pull.
+          image: agent-relay:local
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: RELAY_DATABASE_URL
+              value: postgresql+psycopg://relay:$(POSTGRES_PASSWORD)@postgres:5432/relay
+            - name: RELAY_LEASE_SECONDS
+              value: "60"
+            - name: RELAY_MAX_ATTEMPTS
+              value: "5"
+          # /ready queries the real tables, so a pod that cannot reach the
+          # database is taken out of the Service without being restarted.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # /health is process liveness only; a database outage must not
+          # restart every replica.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
