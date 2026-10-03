@@ -31,6 +31,10 @@ jobs:
 
       # setup-uv publishes no floating major tag; pin the release.
       - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          # Pinned so lockfile checks are reproducible; keep in step with
+          # the Dockerfile's uv image.
+          version: "0.12.22"
 
       - name: kind cluster for the kubernetes target
         uses: ./.github/actions/kind-access
