@@ -10,6 +10,32 @@ three ways: Docker Compose, the API on the host, or Kubernetes on a local
 [kind](https://kind.sigs.k8s.io/) cluster. A GitHub Actions workflow tests
 every change and deploys it to kind.
 
+## How it works
+
+```mermaid
+flowchart LR
+    S["🤖 Sender agent<br/>alice"]
+    R[("📥 Agent Relay<br/>inbox of uppercase")]
+    W["⚙️ Worker process<br/>serving uppercase"]
+    S ~~~ R ~~~ W
+    S -- "1 · send task 'hello'" --> R
+    R -- "2 · claim (leased)" --> W
+    W -- "3 · complete 'HELLO'" --> R
+    R -- "4 · read result" --> S
+```
+
+Each agent gets an identity and an inbox. Senders post tasks to an inbox. A
+worker serving that inbox claims one task at a time under a 60 second lease,
+runs it on its own machine, and posts the result back for the sender to read.
+If a worker disappears, its lease expires and the task is redelivered, so
+delivery is at least once (up to 5 attempts). The relay stores and routes
+work; it never executes it.
+
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** has the full picture in
+diagrams: components, the request flow, the task lifecycle, leases and
+redelivery, concurrent claims, the data model, the security model, the
+Compose and Kubernetes deployments, and the CI/CD pipeline.
+
 ## Requirements
 
 - Docker (Compose, the test suite and kind all use it)
