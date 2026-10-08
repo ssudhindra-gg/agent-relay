@@ -137,7 +137,7 @@ can run on any machine that can reach the relay.
 
 ## Deploy to Kubernetes (kind)
 
-`k8s/` holds kustomize manifests for an `agent-relay` namespace:
+`k8s/` holds the dev kustomize manifests for an `agent-relay` namespace:
 
 - **`postgres`**: a StatefulSet with a 1 Gi PersistentVolumeClaim (the
   cluster's default StorageClass) and `pg_isready` readiness/liveness probes,
@@ -168,6 +168,55 @@ tag you must `kind load` again and `kubectl -n agent-relay rollout restart
 deployment/relay`. The CI deploy job avoids this by giving every version its
 own tag (see below). Changing `k8s/postgres.env` later does not change the
 password of an existing database.
+
+### Production copy
+
+`k8s-production/` is an independent production copy. It uses the
+`agent-relay-production` namespace, its own PostgreSQL StatefulSet and PVC,
+its own generated database secret, and a separately tagged relay image. The
+dev and production copies can run in the same kind or Kubernetes cluster
+without sharing database state or credentials.
+
+Deploy it separately:
+
+```bash
+# Use a different password from dev; this file is gitignored.
+python -c "import secrets; print('POSTGRES_PASSWORD=' + secrets.token_hex(24))" > k8s-production/postgres.env
+
+docker build -t agent-relay:production .
+kind load docker-image agent-relay:production   # for a local kind cluster
+kubectl apply -k k8s-production/
+kubectl -n agent-relay-production rollout status statefulset/postgres
+kubectl -n agent-relay-production rollout status deployment/relay
+
+kubectl -n agent-relay-production port-forward svc/relay 8081:8000
+```
+
+Open `http://127.0.0.1:8081/` for the production copy. For a real cluster,
+publish `agent-relay:production` through the production image registry and
+set the image in `k8s-production/relay.yaml` (or with a Kustomize image
+override) to the approved release tag. The existing CI workflow continues to
+deploy only `k8s/` as dev; production is a separate, explicit promotion.
+
+### Promote dev to production with GitHub Actions
+
+[`promote-production.yml`](.github/workflows/promote-production.yml) is a
+manual workflow. It reads the image from the currently running dev
+`agent-relay` Deployment and applies that exact image to
+`agent-relay-production`; it does not rebuild from a different commit.
+
+Configure a GitHub `production` environment with these secrets before the
+first promotion:
+
+- `KUBE_CONFIG_B64`: base64-encoded kubeconfig for the cluster containing both
+  namespaces.
+- `PRODUCTION_POSTGRES_PASSWORD`: the initial production database password.
+
+The password is used only on the first deployment. Later promotions reuse the
+password already referenced by the production StatefulSet. Start the workflow
+from **Actions → Promote dev to production**, enter `promote` as confirmation,
+and approve the `production` environment if protection rules require it. The
+workflow waits for both rollouts and runs the read-only smoke test afterward.
 
 ## Storage and delivery behavior
 
@@ -277,7 +326,8 @@ reach the kind API. Notes:
 | `worker.py` | the deterministic uppercase worker (`python main.py worker`) |
 | `dashboard.py`, `dashboard.html` | the token-based dashboard |
 | `Dockerfile`, `docker-compose.yaml` | container image and the Compose stack |
-| `k8s/` | kustomize manifests for Kubernetes |
+| `k8s/` | dev Kustomize manifests for Kubernetes |
+| `k8s-production/` | independent production Kustomize manifests |
 | `conftest.py`, `test_*.py` | test suite and integration targets |
 | `scripts/smoke.py` | read-only post-deploy smoke test |
-| `.github/`, `.actrc` | CI workflow, kind access action, act configuration |
+| `.github/`, `.actrc` | CI, production promotion, kind access, and act configuration |

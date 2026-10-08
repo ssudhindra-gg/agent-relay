@@ -7,4 +7,5 @@ __pycache__/
 .pytest_cache/
 *-credentials.json
 k8s/postgres.env
+k8s-production/postgres.env
 .deploy/
