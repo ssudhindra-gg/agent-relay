@@ -1,0 +1,22 @@
+# Independent production copy of Agent Relay.
+#
+# The dev deployment lives in k8s/ and the production deployment lives in its
+# own namespace, with its own PostgreSQL StatefulSet, PVC, and credentials.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: agent-relay-production
+
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - relay.yaml
+
+secretGenerator:
+  - name: postgres-credentials
+    envs:
+      - postgres.env
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: agent-relay-production
